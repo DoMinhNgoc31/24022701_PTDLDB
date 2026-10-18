@@ -16,14 +16,14 @@ library(writexl)
 library(xgboost)
 library(stats)
 library(ggplot2)
-library(fdesc)
-library(mltsp)
+#library(fdesc)
+#library(mltsp)
 library(e1071)
 library(flexsurv)
 library(reticulate)
 library(forecast)
 #************import data********************-----
-excel_file <- "C:/Users/Foued Azuz 14/OneDrive/AI energy/dataset.xlsx"
+excel_file <- "dataset.xlsx"
 sheet_names <- excel_sheets(excel_file)
 all_dataframes <- lapply(sheet_names, function(sheet) {
     read_excel(excel_file, sheet = sheet)
@@ -116,8 +116,8 @@ for (variable in variables_list) {
 #export summary statistics####
 
 subset_df_xts <- as.xts(subset_df)
-mytable <- desc(subset_df_xts)
-export(mytable)
+#mytable <- desc(subset_df_xts)
+#export(mytable)
 
 
 #define functions ------------------------------
@@ -219,16 +219,16 @@ grid <-  expand.grid(layer1 = c(2,3,4),
 
 ###with all variables##
 library(caret)
-nnwti <- train(formula, 
-            data = training_data, 
-            method = "neuralnet", 
-            tuneGrid = grid,
-            metric = "RMSE",
-            preProc = c("center", "scale", "nzv","pca"), #good idea to do this with neural nets - your error is due to non scaled data
-            trControl = trainControl(
-              method = "cv",
-              number = 5,
-              verboseIter = TRUE)
+nnwti <- caret::train(formula,
+                      data = training_data,
+                      method = "neuralnet",
+                      tuneGrid = grid,
+                      metric = "RMSE",
+                      preProc = c("center", "scale", "nzv", "pca"), 
+                      trControl = trainControl(
+                        method = "cv",
+                        number = 5,
+                        verboseIter = TRUE)
 )
 
 nnwti
