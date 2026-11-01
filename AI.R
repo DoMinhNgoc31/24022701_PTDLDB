@@ -1,29 +1,48 @@
 #--------Title:  Predicting energy commodity prices amidst -------------
 #-------worldwide energy transitions using deep learning models --
+#
+# Phiên bản đã cập nhật để chạy trên R >= 4.3 và RStudio / Positron mới.
+# Các chỗ sửa đều có chú thích [UPDATED] (tương thích phiên bản) hoặc [FIX] (lỗi logic / biến chưa định nghĩa).
+#   * keras (v2)  -> keras3        : LSTM viết lại theo Keras 3
+#   * xgboost()   -> xgb.train()   : giao diện cũ (data=, params=) đã thay đổi từ xgboost 2.x/3.x
+#   * ggplot2     : size -> linewidth ; legend.position dạng số -> "inside"
+#   * tidyr       : gather() -> pivot_longer()
+#   * dplyr::lag  : dùng stats::lag() cho đối tượng xts
+#   * bỏ fdesc, mltsp, flexsurv, tensorflow, reticulate (không còn dùng / không có trên CRAN)
+#   * dataset.xlsx : đường dẫn tương đối (cùng thư mục với AI.Rproj)
+#
+# LẦN ĐẦU CHẠY: sau khi cài các gói, chạy thêm MỘT LẦN:   keras3::install_keras()
+#
 ##library#####
+core_pkgs <- c("dplyr", "tidyr", "keras3", "neuralnet", "zoo", "caret",
+               "NeuralNetTools", "readxl", "xts", "writexl", "xgboost",
+               "ggplot2", "e1071", "forecast", "iml", "patchwork", "gridExtra")
+# Gói tùy chọn, chỉ dùng cho phần AutoML ở cuối file: h2o, performance, see, automl, prophet
+missing_pkgs <- setdiff(core_pkgs, rownames(installed.packages()))
+if (length(missing_pkgs) > 0) install.packages(missing_pkgs)
+
 library(dplyr)
 library(tidyr)
-library(keras)
+library(keras3)      # [UPDATED] thay cho keras (v2) + tensorflow
 library(neuralnet)
 library(zoo)
 library(caret)
 library(NeuralNetTools)
-library(tidyr)
-library(tensorflow)
 library(readxl)
 library(xts)
 library(writexl)
 library(xgboost)
-library(stats)
 library(ggplot2)
-#library(fdesc)
-#library(mltsp)
 library(e1071)
-library(flexsurv)
-library(reticulate)
 library(forecast)
+library(patchwork)
+index <- zoo::index
 #************import data********************-----
+# [UPDATED] đường dẫn tương đối: đặt dataset.xlsx cùng thư mục với AI.Rproj
+# (RStudio tự đặt working directory về thư mục dự án khi mở file .Rproj)
 excel_file <- "dataset.xlsx"
+# excel_file <- "C:/Users/Foued Azuz 14/OneDrive/AI energy/dataset.xlsx"   # đường dẫn cũ
+stopifnot("Không tìm thấy dataset.xlsx trong thư mục làm việc" = file.exists(excel_file))
 sheet_names <- excel_sheets(excel_file)
 all_dataframes <- lapply(sheet_names, function(sheet) {
     read_excel(excel_file, sheet = sheet)
@@ -31,7 +50,7 @@ all_dataframes <- lapply(sheet_names, function(sheet) {
 
 all_dataframes <- lapply(all_dataframes, as.data.frame)
   
-for (i in 1:22) {
+for (i in seq_along(all_dataframes)) {   # [UPDATED] thay cho 1:22 cứng
     
     all_dataframes[[i]][["date"]] <- as.Date(all_dataframes[[i]][["date"]])
 
@@ -53,15 +72,15 @@ colnames(ecp)<- c("Date","OIL","GAS","Coal")
 
 
 df <- ecp %>%
-  gather(key = "Variable", value = "value", -Date)
+  pivot_longer(-Date, names_to = "Variable", values_to = "value")
 ggplot(df, aes(x = Date, y = value, linetype = Variable)) + 
-  geom_line(aes(color = Variable), size = 1) +
+  geom_line(aes(color = Variable), linewidth = 1) +
   scale_color_manual(values = c("#59504E", "#59504E", "#222222")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Commodity", linetype = "Commodity")+
 theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'))
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'))
 
 
 
@@ -72,7 +91,8 @@ start_date <- as.Date("2006-10-16")
 end_date <- as.Date("2023-07-24")
 mask <- merged_df$date >= start_date & merged_df$date <= end_date
 subset_df <- merged_df[mask, ]
-subset_df_xts<-as.xts(subset_df)
+# [FIX] as.xts(data.frame) cần rownames là ngày -> tạo xts trực tiếp từ cột date
+subset_df_xts <- xts(subset_df[, -1], order.by = subset_df$date)
 
 ##Replace missing value#####
 
@@ -115,9 +135,22 @@ for (variable in variables_list) {
 
 #export summary statistics####
 
-subset_df_xts <- as.xts(subset_df)
-#mytable <- desc(subset_df_xts)
-#export(mytable)
+# [FIX] as.xts(data.frame) cần rownames là ngày -> tạo xts trực tiếp từ cột date
+subset_df_xts <- xts(subset_df[, -1], order.by = subset_df$date)
+
+# [UPDATED] desc()/export() (gói fdesc) không còn khả dụng -> tự tính bảng thống kê mô tả
+num_cols <- subset_df[, -1, drop = FALSE]
+mytable <- data.frame(
+  Variable = colnames(num_cols),
+  N      = sapply(num_cols, function(x) sum(!is.na(x))),
+  Mean   = sapply(num_cols, function(x) mean(x, na.rm = TRUE)),
+  SD     = sapply(num_cols, function(x) sd(x, na.rm = TRUE)),
+  Min    = sapply(num_cols, function(x) min(x, na.rm = TRUE)),
+  Median = sapply(num_cols, function(x) median(x, na.rm = TRUE)),
+  Max    = sapply(num_cols, function(x) max(x, na.rm = TRUE)),
+  row.names = NULL
+)
+write_xlsx(mytable, "summary_statistics.xlsx")
 
 
 #define functions ------------------------------
@@ -150,6 +183,13 @@ MAE <- function (true_values,predictions) {
   mad <- mean(abs_diff)
   cat("Mean Absolute Deviation (MAD):", mad, "\n") 
   
+}
+
+# [FIX] MAE1 phải được định nghĩa trước khi dùng (phần h2o ở cuối file gọi MAE1 trước khi nó được tạo)
+MAE1 <- function (true_values,predictions) {
+  abs_diff <- abs((true_values - predictions))
+  mad <- mean(abs_diff)
+  cat("Mean Absolute Deviation (MAD):", mad, "\n")
 }
 
 normalize <- function(x) {
@@ -219,16 +259,16 @@ grid <-  expand.grid(layer1 = c(2,3,4),
 
 ###with all variables##
 library(caret)
-nnwti <- caret::train(formula,
-                      data = training_data,
-                      method = "neuralnet",
-                      tuneGrid = grid,
-                      metric = "RMSE",
-                      preProc = c("center", "scale", "nzv", "pca"), 
-                      trControl = trainControl(
-                        method = "cv",
-                        number = 5,
-                        verboseIter = TRUE)
+nnwti <- train(formula, 
+            data = training_data, 
+            method = "neuralnet", 
+            tuneGrid = grid,
+            metric = "RMSE",
+            preProc = c("center", "scale", "nzv","pca"), #good idea to do this with neural nets - your error is due to non scaled data
+            trControl = trainControl(
+              method = "cv",
+              number = 5,
+              verboseIter = TRUE)
 )
 
 nnwti
@@ -265,7 +305,8 @@ nnwti
 
 #plot neural diagram
 tiff("nnfig.jpg",width = 10, height = 10, units = 'in', res = 350) #for high resolution
-plotnet(nnn$finalModel,cex_val =0.5,"","WTI",bord_col="black",pad_x=0.75,
+# [FIX] nnn chưa định nghĩa -> dùng nnwti
+plotnet(nnwti$finalModel,cex_val =0.5,"","WTI",bord_col="black",pad_x=0.75,
        bias=FALSE)
 title("Oil wti")
 dev.off()
@@ -273,7 +314,7 @@ dev.off()
 
 
 #plot predictions vs actual
-predictions <-  predict(nnwti1, newdata = testing_data)
+predictions <-  predict(nnwti, newdata = testing_data)   # [FIX] nnwti1 chưa định nghĩa
 
 tiff("pred_act narx.jpg",width = 10, height = 5, units = 'in', res = 350) #for high resolution
 plot(testing_data$wti, predictions, 
@@ -294,19 +335,19 @@ wtidf$Date <- index(wti_xts)
 colnames(wtidf) <- c("Actual","prediction","Date")
 
 df <- wtidf %>%
-  gather(key = "Variable", value = "value", -Date) %>%
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>%
   filter(value!=0)
 
 tiff("predi_narx.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'))
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'))
 
 dev.off()
 
@@ -344,6 +385,7 @@ g1grevrey <- ggplot(df, aes(x = Importance, y = Group)) +
   ylab("Group") +
   ggtitle("Grouped Importance Values for WTI") +
   theme_minimal()
+print(g1grevrey)   # [FIX] vẽ ggplot vào file ảnh
 dev.off()
 
 
@@ -439,7 +481,7 @@ grid <-  expand.grid(layer1 = c(2,3,4),
                      layer3 = c(2,3,4))
 
 ###with all variables##
-nnGP <- train(formula, 
+nnGP <- caret::train(formula, 
               data = training_data, 
               method = "neuralnet", 
               tuneGrid = grid,
@@ -485,19 +527,19 @@ colnames(GPdf) <- c("Actual","prediction","Date")
 merged <- GPdf[test_idx,]
 
 df <- GPdf %>%
-  gather(key = "Variable", value = "value", -Date) %>%
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>%
   filter(value!=0)
 
 tiff("NARX_GP.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'))
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'))
 
 dev.off()
 
@@ -536,6 +578,7 @@ g2grevrey <- ggplot(df, aes(x = Importance, y = Group)) +
   ylab("Group") +
   ggtitle("Grouped Importance Values for Natural Gas") +
   theme_minimal()
+print(g2grevrey)   # [FIX] vẽ ggplot vào file ảnh
 dev.off()
 
 ## ifisher####
@@ -620,7 +663,7 @@ formula <- coal ~ coal1+coal2+coal3+coal4+TB+LTY+I+SRV+GOP+GIPIO+M2+IPI+UMP+EEPH
   GR+EPI# political factors
 
 ###with all variables##
-nncoal <- train(formula, 
+nncoal <- caret::train(formula, 
              data = training_data, 
              method = "neuralnet", 
              tuneGrid = grid,
@@ -668,19 +711,19 @@ colnames(coaldf) <- c("Actual","prediction","Date")
 library(tidyr)
 library(dplyr)
 df <- coaldf %>%
-  gather(key = "Variable", value = "value", -Date) %>%
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>%
   filter(value!=0)
 
 tiff("predi_narx_coal.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'))
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'))
 
 dev.off()
 
@@ -718,6 +761,7 @@ g3grevrey <- ggplot(df, aes(x = Importance, y = Group)) +
   ylab("Group") +
   ggtitle("Grouped Importance Values for Coal") +
   theme_minimal()
+print(g3grevrey)   # [FIX] vẽ ggplot vào file ảnh
 dev.off()
 
 
@@ -804,7 +848,7 @@ grid <-  expand.grid(layer1 = c(2,3,4),
                      layer2 = c(2,3,4),
                      layer3 = c(2,3,4))
 
-nnwtimacro <- train(formula, 
+nnwtimacro <- caret::train(formula, 
                data = training_data, 
                method = "neuralnet", 
                tuneGrid = grid,
@@ -851,7 +895,7 @@ grid <-  expand.grid(layer1 = c(2,3,4),
                      layer2 = c(2,3,4),
                      layer3 = c(2,3,4))
 
-nngpmacro <- train(formula, 
+nngpmacro <- caret::train(formula, 
                     data = training_data, 
                     method = "neuralnet", 
                     tuneGrid = grid,
@@ -897,7 +941,7 @@ grid <-  expand.grid(layer1 = c(2,3,4),
                      layer2 = c(2,3,4),
                      layer3 = c(2,3,4))
 
-nncoalmacro <- train(formula, 
+nncoalmacro <- caret::train(formula, 
                    data = training_data, 
                    method = "neuralnet", 
                    tuneGrid = grid,
@@ -960,7 +1004,7 @@ grid <-  expand.grid(layer1 = c(1,2,3),
 formula <- output_data ~ X1+X2+X3+X4
   
 
-ann <- train(formula, 
+ann <- caret::train(formula, 
                 data = training_data, 
                 method = "neuralnet", 
                 tuneGrid = grid,
@@ -973,7 +1017,7 @@ ann <- train(formula,
 )
 ann
 #prepare for plot
-predictions <- predict(nngpmacro, testing_data)
+predictions <- predict(ann, testing_data)   # [FIX] dùng mô hình ANN của WTI (trước đây gọi nhầm nngpmacro)
 
 RMSE(testing_data$output_data,predictions)
 MAE(testing_data$output_data,predictions)
@@ -990,27 +1034,28 @@ wtiB <- subset_df_xts$wti
 wtiB <- na.omit(wti)
 split_index <- floor(0.8 * nrow(wtiB))
 wtiB$predict <- 0
-wtiB$predict[(split_index)+1:nrow(wtiB)] <- revpredict
+wtiB$predict[(split_index + 1):nrow(wtiB)] <- revpredict   # [FIX] sai thứ tự ưu tiên toán tử
 wtidf <- as.data.frame(wtiB)
 wtidf$date <- index(wtiB)
 colnames(wtidf) <- c("Actual","prediction","Date")
 
 df <- wtidf %>%
-  gather(key = "Variable", value = "value", -Date) %>%
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>%
   filter(value!=0)
 
 tiff("ANN_pred_wti.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 g1 <-ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction", title = "WTI")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'),
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
         plot.title = element_text(hjust = 0.5))
 
+print(g1)   # [FIX] vẽ ggplot vào file ảnh
 dev.off()
 
 
@@ -1041,7 +1086,7 @@ grid <-  expand.grid(layer1 = c(1, 2,3),
 formula <- output_data ~ X1+X2+X3+X4
 
 #ann for gas
-ann1 <- train(formula, 
+ann1 <- caret::train(formula, 
               data = training_data, 
               method = "neuralnet", 
               tuneGrid = grid,
@@ -1078,21 +1123,22 @@ gpdf$date <- index(gp)
 colnames(gpdf) <- c("Actual","prediction","Date")
 
 df <- gpdf %>%
-  gather(key = "Variable", value = "value", -Date) %>%
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>%
   filter(value!=0)
 
 tiff("ANN_pred_GP.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 g2 <- ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction", title = "GP")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'),
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
         plot.title = element_text(hjust = 0.5))
 
+print(g2)   # [FIX] vẽ ggplot vào file ảnh
 dev.off()
 
 
@@ -1122,7 +1168,7 @@ grid <-  expand.grid(layer1 = c(1, 2,3),
 formula <- output_data ~ X1+X2+X3+X4
 
 #ann for coal
-ann2 <- train(formula, 
+ann2 <- caret::train(formula, 
               data = training_data, 
               method = "neuralnet", 
               tuneGrid = grid,
@@ -1162,21 +1208,22 @@ coaldf$date <- index(coalB)
 colnames(coaldf) <- c("Actual","prediction","Date")
 
 df <- coaldf %>%
-  gather(key = "Variable", value = "value", -Date) %>%
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>%
   filter(value!=0)
 
 tiff("ANN_pred_coal.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 g3 <- ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction", title = "Coal")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'),
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
         plot.title = element_text(hjust = 0.5))
 
+print(g3)   # [FIX] vẽ ggplot vào file ảnh
 dev.off()
 
 
@@ -1258,25 +1305,28 @@ dim(x_train) <- c(length(x_train), 1, 1)
 X_shape2 = dim(x_train)[2]
 X_shape3 = dim(x_train)[3]
 batch_size = 1                # must be a common factor of both the train and test samples
-units = 1     
-library(keras)
-model <- keras_model_sequential()
+units = 1
 
-model%>%
-  layer_lstm(units, batch_input_shape = c(batch_size, X_shape2, X_shape3), stateful= TRUE)%>%
+# [UPDATED] Keras 3 (gói keras3): không còn tham số batch_input_shape cho LSTM stateful.
+# Dùng functional API với keras_input(batch_shape = ...).
+# Lần đầu chạy cần: keras3::install_keras()
+inputs <- keras_input(batch_shape = c(batch_size, X_shape2, X_shape3))
+lstm_layer <- layer_lstm(units = units, stateful = TRUE)
+outputs <- lstm_layer(inputs) %>%
   layer_dense(units = 1)
+model <- keras_model(inputs, outputs)
 
 model %>% compile(
   loss = 'mean_squared_error',
-  optimizer = optimizer_adam(),  
-  metrics = c("mean_absolute_error")
+  optimizer = optimizer_adam(),
+  metrics = list("mae")
 )
 summary(model)
 
-Epochs = 50   
+Epochs = 50
 for(i in 1:Epochs ){
   model %>% fit(x_train, y_train, epochs=1, batch_size=batch_size, verbose=1, shuffle=FALSE)
-  model %>% reset_states() 
+  reset_state(lstm_layer)   # [UPDATED] đổi reset_states() -> reset_state() (keras3)
 }
 
 L = length(x_test)
@@ -1286,11 +1336,11 @@ predictions = numeric(L)
 for(i in 1:L){
   X = x_test[i]
   dim(X) = c(1,1,1)
-  yhat = model %>% predict(X, batch_size=batch_size)
+  yhat = predict(model, X, batch_size = batch_size, verbose = 0)   # [UPDATED] keras3
   # invert scaling
   yhat = invert_scaling(yhat, scaler,  c(-1, 1))
   # invert differencing
-  yhat  = yhat + coal[(n+i)]
+  yhat  = yhat + as.numeric(coal[(n+i)])
   # store
   predictions[i] <- yhat
 }
@@ -1337,43 +1387,43 @@ library(tidyr)
 library(dplyr)
 
 df <- gpdf %>%
-  gather(key = "Variable", value = "value", -Date) %>%
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>%
   filter(value!=0)
 
 # tiff("LSTM_pred_gp.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 library(ggplot2)
 g1lstm <- ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction", title = "WTI")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'),
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
         plot.title = element_text(hjust = 0.5))
 
 
 
 
 g2lstm <- ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction", title = "GP")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'),
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
         plot.title = element_text(hjust = 0.5))
 
 
 g3lstm <- ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction", title = "Coal")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'),
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
         plot.title = element_text(hjust = 0.5))
 
 # dev.off()
@@ -1427,7 +1477,7 @@ label_column <- as.numeric(train_data$wti)
 features <- as.matrix(train_data[, c("Lag1", "Lag2")])
 dtrain <- xgb.DMatrix(data = features, label = label_column)
 # Train the model
-model <- xgboost(data = dtrain, params = params, nrounds = 100)
+model <- xgb.train(params = params, data = dtrain, nrounds = 100)   # [UPDATED] xgboost() kiểu cũ đã bị thay đổi
 
 predictions <- predict(model, xgb.DMatrix(as.matrix(test_data[, c("Lag1", "Lag2")])))
 
@@ -1451,21 +1501,22 @@ merged <- wtidf[(split_index + 1):nrow(wtiB),]
 
 
 df <- wtidf %>%
-  gather(key = "Variable", value = "value", -Date) %>% 
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>% 
   filter(value!=0)
 
 tiff("xgboost_pred_wti.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 g1xgboost <- ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction", title = "WTI")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'),
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
         plot.title = element_text(hjust = 0.5))
 
+print(g1xgboost)   # [FIX] vẽ ggplot vào file ảnh
 dev.off()
 
 
@@ -1501,7 +1552,7 @@ library(xgboost)
 dtrain <- xgb.DMatrix(data = features, label = label_column)
 
 # Train the model
-model <- xgboost(data = dtrain, params = params, nrounds = 100)
+model <- xgb.train(params = params, data = dtrain, nrounds = 100)   # [UPDATED] xgboost() kiểu cũ đã bị thay đổi
 
 predictions_xgboost_gp <- predict(model, xgb.DMatrix(as.matrix(test_data[, c("Lag1", "Lag2")])))
 
@@ -1526,20 +1577,21 @@ merged <- GPdf[(split_index + 1):nrow(GPB),]
 
 
 df <- GPdf %>%
-  gather(key = "Variable", value = "value", -Date) %>% 
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>% 
   filter(value!=0)
 
 tiff("xgboost_pred_GP.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 g2xgboost <- ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction", title = "GP")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'),
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
         plot.title = element_text(hjust = 0.5))
+print(g2xgboost)   # [FIX] vẽ ggplot vào file ảnh
 dev.off()
 
 
@@ -1579,7 +1631,7 @@ library(xgboost)
 dtrain <- xgb.DMatrix(data = features, label = label_column)
 
 # Train the model
-model <- xgboost(data = dtrain, params = params, nrounds = 100)
+model <- xgb.train(params = params, data = dtrain, nrounds = 100)   # [UPDATED] xgboost() kiểu cũ đã bị thay đổi
 
 predictions <- predict(model, xgb.DMatrix(as.matrix(test_data[, c("Lag1", "Lag2")])))
 
@@ -1601,20 +1653,21 @@ colnames(coaldf) <- c("Actual","prediction","Date")
 
 
 df <- coaldf %>%
-  gather(key = "Variable", value = "value", -Date) %>% 
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>% 
   filter(value!=0)
 
 tiff("xgboost_pred_coal.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 g3xgboost <- ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction", title = "Coal")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'),
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
         plot.title = element_text(hjust = 0.5))
+print(g3xgboost)   # [FIX] vẽ ggplot vào file ảnh
 dev.off()
 
 
@@ -1642,32 +1695,30 @@ ggsave("combined_plot_xgboost.png", width = 12, height = 6, plot = graphxgboost,
 #***********camparing accuracy difference***********************####
 
 
-##Results1####
-squaerror_wti_narx <- wtidf$error
-squaerror_wti_ANN <- mergedwti$error
-squaerror_wti_lstm <- combin$error
-squaerror_wti_xgboost <- merged$error
-##results 2#####
-squaerror_gp_narx <- merged$error
-squaerror_gp_ANN <- mergedgp$error
-squaerror_gp_LSTM <- combin$error
-squaerror_gp_xgboost <- merged$error
-##results 3####
-squaerror_coal_narx <- bb$error
-squaerror_coal_ann <- bb$error
-squaerror_coal_lstm <- combin$error
-squaerror_coal_xgboost <- bb$error
+# [FIX] Khối so sánh Diebold-Mariano dưới đây tham chiếu các cột không tồn tại
+# (wtidf$error, mergedwti$error, combin$error, merged$error, bb$error...) nên không chạy được.
+# Cần tính vectơ sai số của từng mô hình trên CÙNG tập test rồi mới dùng dm.test().
+# ##Results1####
+# squaerror_wti_narx <- wtidf$error
+# squaerror_wti_ANN <- mergedwti$error
+# squaerror_wti_lstm <- combin$error
+# squaerror_wti_xgboost <- merged$error
+# ##results 2#####
+# squaerror_gp_narx <- merged$error
+# squaerror_gp_ANN <- mergedgp$error
+# squaerror_gp_LSTM <- combin$error
+# squaerror_gp_xgboost <- merged$error
+# ##results 3####
+# squaerror_coal_narx <- bb$error
+# squaerror_coal_ann <- bb$error
+# squaerror_coal_lstm <- combin$error
+# squaerror_coal_xgboost <- bb$error
 
 
-library(forecast)
-#repeat for each test 
-dm.test(squaerror_coal_narx,squaerror_coal_xgboost,alternative = "less",
-        h = 4, power = 2)
-
-
-
-
-
+# library(forecast)
+# #repeat for each test 
+# dm.test(squaerror_coal_narx,squaerror_coal_xgboost,alternative = "less",
+#         h = 4, power = 2)
 
 
 
@@ -1676,14 +1727,15 @@ dm.test(squaerror_coal_narx,squaerror_coal_xgboost,alternative = "less",
 subset_before <- subset_df_xts[index(subset_df_xts) <"2020-03-11"]
 subset_after <- subset_df_xts[index(subset_df_xts) >= "2020-03-11"]
 
+# [UPDATED] dplyr::lag() không tương thích với xts -> dùng stats::lag() (lag.xts) ở phần dưới
 #******************NARX model before crisis******************####
 
 # NARX model using neuralnet for WTI before crisis*####
 
 exoge <-subset_before[,-1]
-lag1_target <- lag(subset_before$wti, 1)
+lag1_target <- stats::lag(subset_before$wti, 1)
 colnames(lag1_target) <- "wti1"
-lag2_target <- lag(subset_before$wti, 2)
+lag2_target <- stats::lag(subset_before$wti, 2)
 colnames(lag2_target) <- "wti2"
 time <- length(subset_before$wti)
 wti<-subset_before$wti
@@ -1717,7 +1769,7 @@ grid <-  expand.grid(layer1 = c(1, 2,3),
 ###with all variables##
 library(dplyr)
 library(caret)
-subnn <- train(formula, 
+subnn <- caret::train(formula, 
             data = training_data, 
             method = "neuralnet", 
             tuneGrid = grid,
@@ -1735,9 +1787,9 @@ predictions <-  predict(subnn, newdata = testing_data)
 # NARX model using neuralnet for GAS before crisis*####
 
 exoge <-subset_before[,-2]
-lag1_target <- lag(subset_before$GP, 1)
+lag1_target <- stats::lag(subset_before$GP, 1)
 colnames(lag1_target) <- "gp1"
-lag2_target <- lag(subset_before$GP, 2)
+lag2_target <- stats::lag(subset_before$GP, 2)
 colnames(lag2_target) <- "gp2"
 time <- length(subset_before$GP)
 gp<-subset_before$GP
@@ -1771,7 +1823,7 @@ grid <-  expand.grid(layer1 = c(1, 2,3),
 ###with all variables##
 library(dplyr)
 library(caret)
-subnngp <- train(formula, 
+subnngp <- caret::train(formula, 
                data = training_data, 
                method = "neuralnet", 
                tuneGrid = grid,
@@ -1789,9 +1841,9 @@ predictionsgpsub <-  predict(subnngp, newdata = testing_data)
 
 # NARX model using neuralnet for Coal before crisis*####
 exoge <-subset_before[,-3]
-lag1_target <- lag(subset_before$coal, 1)
+lag1_target <- stats::lag(subset_before$coal, 1)
 colnames(lag1_target) <- "coal1"
-lag2_target <- lag(subset_before$coal, 2)
+lag2_target <- stats::lag(subset_before$coal, 2)
 colnames(lag2_target) <- "coal2"
 time <- length(subset_before$coal)
 coal<-subset_before$coal
@@ -1824,7 +1876,7 @@ grid <-  expand.grid(layer1 = c(1, 2,3),
                      layer3 = c(1,2,3))
 
 ###with all variables##
-nncoalsub <- train(formula, 
+nncoalsub <- caret::train(formula, 
                 data = training_data, 
                 method = "neuralnet", 
                 tuneGrid = grid,
@@ -1851,25 +1903,26 @@ coaldf$Date <- index(coal_xts)
 colnames(coaldf) <- c("Actual","prediction","Date")
 
 df <- coaldf %>%
-  gather(key = "Variable", value = "value", -Date) %>%
+  pivot_longer(-Date, names_to = "Variable", values_to = "value") %>%
   filter(value!=0)
 
 tiff("NARX_coal.jpg",width = 10, height = 6, units = 'in', res = 350) #for high resolution
 
 ggplot(df, aes(x = Date, y = value)) +
-  geom_line(aes(color = Variable), size = 1)+
+  geom_line(aes(color = Variable), linewidth = 1)+
   scale_color_manual(values = c("black", "red")) +
-  theme(legend.position = c(0.1, 0.80))+
+  theme(legend.position = "inside", legend.position.inside = c(0.1, 0.80))+
   labs(color = "Actual vs Prediction")+
   theme(panel.background = element_blank())+
-  theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
-        axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid'))
+  theme(axis.line.x = element_line(colour = 'black', linewidth=0.5, linetype='solid'),
+        axis.line.y = element_line(colour = 'black', linewidth=0.5, linetype='solid'))
 
 dev.off()
 
 
 #---------------AUTOML using h2o-------------------------------
 
+if (requireNamespace("h2o", quietly = TRUE)) {   # [UPDATED] phần tùy chọn
 library(h2o)
 h2o.init()
 library(writexl)
@@ -1919,22 +1972,20 @@ mse <- mean((comparison$wti - comparison$predict)^2)
 mae <- MAE1(comparison$wti,comparison$predict)
 rmse <-RMSE(comparison$wti,comparison$predict)
 squared <-Rsquared(comparison$wti,comparison$predict)
+} else message("Bỏ qua h2o AutoML: chưa cài gói h2o")
 
 
+if (requireNamespace("performance", quietly = TRUE) && requireNamespace("see", quietly = TRUE)) {
 library(performance)
 m <- lm(wti~.,maxmindata)
 check_model(m)
 check_normality(m)
 check_autocorrelation(m)
+} else message("Bỏ qua performance::check_model: cần cài gói performance và see")
 
 #---------------AUTOML using autoML package-------------------------------
-MAE1 <- function (true_values,predictions) {
-  
-  abs_diff <- abs((true_values - predictions))
-  mad <- mean(abs_diff)
-  cat("Mean Absolute Deviation (MAD):", mad, "\n") 
-  
-}
+# [FIX] MAE1 đã được chuyển lên mục "define functions" (trước đây định nghĩa sau khi đã được gọi)
+if (requireNamespace("automl", quietly = TRUE)) {   # [UPDATED] phần tùy chọn
 library(automl)
 dataauto <- maxmindata[,-c(36:39)]
 xmat <- dataauto[,-3]
@@ -1947,15 +1998,17 @@ res <- as.data.frame(res)
 mae <- MAE1(res$actual,res$predict)
 rmse <-RMSE(res$actual,res$predict)
 squared <-Rsquared(res$actual,res$predict)
+} else message("Bỏ qua automl: chưa cài gói automl")
 
 #----------------autoML using prophet-----------------------
+if (requireNamespace("prophet", quietly = TRUE)) {   # [UPDATED] phần tùy chọn
 library(prophet)
-data <- subset_df_filled[,c(1:2)]
+data <- subset_df[, c("date", "wti")]   # [FIX] subset_df_filled chưa định nghĩa -> subset_df (dữ liệu đã điền NA)
 colnames(data)<- c("ds","y")
-m <- prophet(data.frame(ds = data$ds, y = data$y), fit = FALSE)
-m <- fit.prophet(m)
+m <- prophet(data.frame(ds = data$ds, y = data$y))   # [FIX] fit.prophet() cần tham số df
 
 future <- make_future_dataframe(m, periods = 365, freq = "day")  # Adjust the number of periods as needed
+} else message("Bỏ qua prophet: chưa cài gói prophet")
 
 
 
@@ -1963,6 +2016,9 @@ future <- make_future_dataframe(m, periods = 365, freq = "day")  # Adjust the nu
 
 
 #---------------AUTOML using autokeras package-------------------------------
+# [UPDATED] Gói R "autokeras" (bản cuối 2021) phụ thuộc keras v2 / Keras 2, xung đột với keras3 -> TẮT mặc định.
+# Đổi FALSE thành TRUE chỉ khi bạn tự dựng môi trường Python/keras cũ riêng cho phần này.
+if (FALSE) {
 # Load required libraries
 library(autokeras)
 
@@ -2013,6 +2069,7 @@ reg <- model_structured_data_regressor(max_trials = 10) %>% # It tries 10 differ
 (predicted_y <- reg %>% predict(test_file_to_predict))
 reg %>% evaluate(test_file_to_eval, "coal")
 export_model(reg)
+}
 
 
 
@@ -2025,3 +2082,486 @@ export_model(reg)
 
 
 #---------------------------------END---------------------------------------------
+
+
+
+#==================================================================================================
+#  >>> PHẦN MỞ RỘNG (EXTENDED EXPERIMENTS) – THÊM VÀO CUỐI FILE <<<
+#
+#  Phương pháp chọn từ Table 1 (Related Studies): SVR – Support Vector Regression
+#  (Göncü, Kuzubaş & Saltoğlu 2024 dùng SVR cho giá dầu; Zhang et al. 2022 dùng SVR trong mô hình lai).
+#  Lý do chọn: chạy bằng gói e1071 (đã nạp sẵn ở đầu file), không cần Python/keras, hợp với cỡ mẫu ~4.000 quan sát.
+#
+#  So sánh SVR với các mô hình của bài báo, trên CÙNG dữ liệu, CÙNG chia 80/20, CÙNG thang đo min-max [0,1]:
+#     NARX (neuralnet + PCA) | XGBoost | Naive (random walk: y[t] = y[t-1])
+#  (LSTM không chạy lại ở đây vì tốn thời gian và cần Python; số liệu LSTM của bài báo in ở bảng tham chiếu.)
+#
+#  Các thí nghiệm:
+#     E1  So sánh chính trên tập test + kiểm định Diebold-Mariano (SVR vs từng mô hình)
+#     E2  SVR: so sánh kernel (RBF / tuyến tính / đa thức bậc 2) và SVR + PCA
+#     E3  SVR: loại bỏ nhóm biến (nhóm nào đóng góp cho dự báo? kiểm tra luận điểm "năng lượng tái tạo" của bài báo)
+#     E4  Sai số theo giai đoạn trong tập test: COVID-19 vs chiến tranh Nga-Ukraine (từ 2022-02-24)
+#     E5  Dự báo nhiều bước (h = 1, 5, 10, 20 ngày) – bài báo chỉ dự báo 1 bước
+#
+#  CÁCH CHẠY: chạy hết phần đầu file (nạp dữ liệu, định nghĩa hàm, tới dòng ~205) rồi chạy cả khối này.
+#  Nếu đã chạy các phần NARX ở trên (nnwti, nnGP, nncoal) thì khối này dùng lại chúng; nếu chưa thì tự huấn luyện
+#  lại NARX với cấu trúc nơron trong Figure 3: dầu (4,4,2), khí (4,4,4), than (4,3,2).
+#  Chạy thử nhanh: đặt EXT_FAST <- TRUE (lưới siêu tham số nhỏ).  Kết quả ghi ra ext_SVR_extended_results.xlsx + 3 ảnh PNG.
+#==================================================================================================
+
+if (!exists("subset_df_xts") || !exists("normalize")) {
+  stop("Chưa có 'subset_df_xts' / 'normalize'. Hãy chạy phần nạp dữ liệu và định nghĩa hàm (từ đầu file tới dòng ~205) trước.")
+}
+suppressPackageStartupMessages({
+  library(e1071); library(caret); library(xgboost); library(forecast)
+  library(ggplot2); library(dplyr); library(tidyr); library(writexl); library(zoo); library(xts)
+})
+
+#---- Cấu hình ----------------------------------------------------------------------------------
+EXT_SEED       <- 2024
+EXT_TRAIN_FRAC <- 0.8                   # như bài báo: 80% train / 20% test (~ mốc 11/03/2020)
+EXT_N_LAGS     <- 4                     # 4 độ trễ của biến mục tiêu (như NARX)
+EXT_HORIZONS   <- c(1, 5, 10, 20)       # E5: số ngày dự báo trước
+EXT_WAR_DATE   <- as.Date("2022-02-24") # E4: mốc chia giai đoạn trong tập test
+EXT_CV_FOLDS   <- 4                     # số fold rolling-origin khi tune SVR
+EXT_FAST       <- FALSE                 # TRUE = lưới siêu tham số nhỏ, chạy nhanh để thử
+
+EXT_TARGETS <- list(
+  OIL  = list(target = "wti",  narx_obj = "nnwti",  hidden = c(4, 4, 2)),
+  GAS  = list(target = "GP",   narx_obj = "nnGP",   hidden = c(4, 4, 4)),
+  COAL = list(target = "coal", narx_obj = "nncoal", hidden = c(4, 3, 2))
+)
+
+# Nhóm biến: đúng như công thức NARX và danh sách 'groups' ở phần trên của file
+EXT_GROUPS <- list(
+  macro   = c("TB", "LTY", "I", "SRV", "GOP", "GIPIO", "M2", "IPI", "UMP", "EEPH"),
+  env     = c("TEMP", "co2_per_capita"),
+  tech    = c("solarpv", "solarthermal", "solarpvthermalhybrid", "wind",
+              "hydropower", "marineandtidal", "bioenergy", "geothermal"),
+  renew   = c("bioenergyLCOE", "geothermalLCOE", "offshorewindLCOE", "solarphotovoltaicLCOE",
+              "concentratedsolarLCOE", "hydropowerLCOE", "onshorewindLCOE",
+              "AC_WIND_E", "AC_SOLAR_E", "AC_HYD_E"),
+  politic = c("GR", "EPI")
+)
+
+#---- Hàm 1: dựng dữ liệu y hệt các khối NARX ở trên (4 lag, bỏ 8 dòng đầu, min-max, chia 80/20) -------
+ext_build <- function(target, xts_all = subset_df_xts) {
+  stopifnot(target %in% colnames(xts_all))
+  n_lags <- EXT_N_LAGS
+  y_xts  <- xts_all[, target]
+  exoge  <- xts_all[, setdiff(colnames(xts_all), target)]
+  dat    <- data.frame(y_xts, exoge)
+  keep   <- !is.na(dat[[target]])
+  dat    <- dat[keep, , drop = FALSE]
+  d_all  <- zoo::index(xts_all)[keep]
+  y_obs  <- as.numeric(dat[[target]])
+
+  lagm   <- embed(y_obs, n_lags + 1)[-seq_len(n_lags), , drop = FALSE]  # cột 1 = y[t], cột 2.. = lag 1..4
+  drop_n <- 2 * n_lags                                                  # = 8 dòng đầu như code gốc
+  dat    <- dat[-seq_len(drop_n), , drop = FALSE]
+  d_all  <- d_all[-seq_len(drop_n)]
+  stopifnot(nrow(lagm) == nrow(dat),
+            isTRUE(all.equal(unname(lagm[, 1]), unname(dat[[target]]))))  # kiểm tra căn hàng
+
+  lag_names <- paste0(tolower(target), seq_len(n_lags))                 # wti1.., gp1.., coal1.. (khớp nnwti/nnGP/nncoal)
+  lag_df    <- as.data.frame(lagm[, -1, drop = FALSE])
+  names(lag_df) <- lag_names
+  dat <- cbind(dat, lag_df)
+
+  dat[] <- lapply(dat, function(x) ifelse(is.na(x), mean(x, na.rm = TRUE), x))  # NA -> trung bình (như code gốc)
+  md    <- as.data.frame(lapply(dat, normalize))                                 # min-max như bài báo
+  md[]  <- lapply(md, function(x) { x[!is.finite(x)] <- 0; x })
+
+  feats_all <- c(lag_names, unlist(EXT_GROUPS, use.names = FALSE))
+  miss <- setdiff(feats_all, names(md))
+  if (length(miss) > 0) stop("Thiếu biến trong dữ liệu: ", paste(miss, collapse = ", "))
+
+  n    <- nrow(md)
+  n_tr <- round(EXT_TRAIN_FRAC * n)
+  list(target = target, md = md, dates = d_all, n = n, n_train = n_tr,
+       train_idx = seq_len(n_tr), test_idx = (n_tr + 1):n,
+       lag_names = lag_names, feats_all = feats_all,
+       range_y = diff(range(dat[[target]])))                              # để quy đổi RMSE về đơn vị giá (USD)
+}
+
+#---- Hàm 2: chỉ số đánh giá --------------------------------------------------------------------------
+ext_metrics <- function(actual, pred, prev, range_y = 1, naive_rmse = NA_real_, is_naive = FALSE) {
+  ok <- is.finite(actual) & is.finite(pred) & is.finite(prev)
+  if (sum(ok) < 10) {
+    return(data.frame(RMSE = NA_real_, MAE = NA_real_, R2 = NA_real_, DA = NA_real_,
+                      RMSE_vs_Naive = NA_real_, RMSE_orig = NA_real_, MAE_orig = NA_real_))
+  }
+  a <- actual[ok]; p <- pred[ok]; pv <- prev[ok]
+  rmse <- sqrt(mean((a - p)^2))
+  mae  <- mean(abs(a - p))
+  r2   <- suppressWarnings(stats::cor(a, p)^2)                 # R2 = bình phương tương quan (phương trình 19 của bài báo)
+  chg  <- a != pv
+  da   <- if (is_naive || sum(chg) == 0) NA_real_ else mean(sign(p[chg] - pv[chg]) == sign(a[chg] - pv[chg]))
+  data.frame(RMSE = rmse, MAE = mae, R2 = r2, DA = da,
+             RMSE_vs_Naive = rmse / naive_rmse,                 # < 1: tốt hơn Naive
+             RMSE_orig = rmse * range_y, MAE_orig = mae * range_y)
+}
+
+#---- Hàm 3: SVR (e1071) ------------------------------------------------------------------------------
+ext_grid <- function(kernel) {
+  if (EXT_FAST) {
+    return(switch(kernel,
+      linear     = expand.grid(cost = 1,       gmult = 1,        epsilon = 0.1),
+      polynomial = expand.grid(cost = c(1, 10), gmult = 0.25,    epsilon = 0.1),
+                   expand.grid(cost = c(1, 10), gmult = c(0.25, 1), epsilon = 0.1)))
+  }
+  switch(kernel,
+    linear     = expand.grid(cost = c(0.1, 1, 10),  gmult = 1,              epsilon = c(0.01, 0.1)),
+    polynomial = expand.grid(cost = c(0.1, 1, 10),  gmult = c(0.25, 1),     epsilon = c(0.01, 0.1)),
+                 expand.grid(cost = c(1, 10, 100),  gmult = c(0.25, 1, 4),  epsilon = c(0.01, 0.1)))
+}
+
+ext_svr_fit <- function(X, y, kernel, cost, gmult, epsilon) {
+  args <- list(x = X, y = y, type = "eps-regression", kernel = kernel,
+               cost = cost, gamma = gmult / ncol(X), epsilon = epsilon, scale = TRUE)
+  if (kernel == "polynomial") { args$degree <- 2; args$coef0 <- 1 }
+  suppressWarnings(do.call(e1071::svm, args))
+}
+
+# Tune bằng rolling-origin CV (cửa sổ mở rộng, không xáo trộn thời gian -> không rò rỉ tương lai)
+ext_svr_tune <- function(X, y, kernel = "radial") {
+  grid <- ext_grid(kernel)
+  n <- nrow(X); k <- EXT_CV_FOLDS
+  cuts <- floor(seq(floor(0.4 * n), n, length.out = k + 1))
+  grid$cv_rmse <- NA_real_
+  for (g in seq_len(nrow(grid))) {
+    errs <- rep(NA_real_, k)
+    for (f in seq_len(k)) {
+      tr <- seq_len(cuts[f])
+      va <- (cuts[f] + 1):cuts[f + 1]
+      m <- try(ext_svr_fit(X[tr, , drop = FALSE], y[tr], kernel,
+                           grid$cost[g], grid$gmult[g], grid$epsilon[g]), silent = TRUE)
+      if (inherits(m, "try-error")) next
+      p <- as.numeric(predict(m, X[va, , drop = FALSE]))
+      errs[f] <- sqrt(mean((y[va] - p)^2))
+    }
+    grid$cv_rmse[g] <- mean(errs, na.rm = TRUE)
+  }
+  if (all(!is.finite(grid$cv_rmse))) return(grid[1, , drop = FALSE])
+  grid[which.min(grid$cv_rmse), , drop = FALSE]
+}
+
+# Bỏ biến gần như hằng số (nzv) dựa trên tập train; trả về ma trận train/test
+ext_select_X <- function(md, feats, tr, te) {
+  X  <- as.matrix(md[, feats, drop = FALSE])
+  nz <- caret::nearZeroVar(X[tr, , drop = FALSE])
+  if (length(nz) > 0) X <- X[, -nz, drop = FALSE]
+  list(Xtr = X[tr, , drop = FALSE], Xte = X[te, , drop = FALSE])
+}
+
+ext_pca <- function(Xtr, Xte, thresh = 0.95) {
+  pp <- caret::preProcess(as.data.frame(Xtr), method = c("center", "scale", "pca"), thresh = thresh)
+  list(Xtr = as.matrix(predict(pp, as.data.frame(Xtr))),
+       Xte = as.matrix(predict(pp, as.data.frame(Xte))))
+}
+
+#---- Hàm 4: XGBoost (cùng cách gọi xgb.train như phần xgboost ở trên) ------------------------------------
+ext_xgb <- function(Xtr, ytr, Xte, tuned = TRUE) {
+  set.seed(EXT_SEED)
+  if (tuned) {
+    params <- list(objective = "reg:squarederror", eval_metric = "rmse", eta = 0.05,
+                   max_depth = 4, subsample = 0.8, colsample_bytree = 0.8)
+    nr <- 300
+  } else {                                   # giống code gốc của bài báo (tham số mặc định, 100 vòng)
+    params <- list(objective = "reg:squarederror", eval_metric = "rmse")
+    nr <- 100
+  }
+  dtr <- xgboost::xgb.DMatrix(data = as.matrix(Xtr), label = as.numeric(ytr))
+  m   <- xgboost::xgb.train(params = params, data = dtr, nrounds = nr, verbose = 0)
+  as.numeric(predict(m, xgboost::xgb.DMatrix(as.matrix(Xte))))
+}
+
+#---- Hàm 5: NARX của bài báo (dùng lại nnwti/nnGP/nncoal nếu có, nếu không thì huấn luyện lại) ------------
+ext_narx <- function(ds, narx_obj, hidden) {
+  te <- ds$md[ds$test_idx, , drop = FALSE]
+  if (exists(narx_obj, envir = .GlobalEnv, inherits = FALSE)) {
+    mdl <- get(narx_obj, envir = .GlobalEnv)
+    p <- try(as.numeric(predict(mdl, newdata = te)), silent = TRUE)
+    if (!inherits(p, "try-error") && length(p) == nrow(te) && all(is.finite(p))) {
+      message("   NARX: dùng lại mô hình '", narx_obj, "' đã huấn luyện ở phần trên của file")
+      return(p)
+    }
+  }
+  message("   NARX: huấn luyện lại, cấu trúc ", paste(hidden, collapse = "-"), " (Figure 3 của bài báo)")
+  form <- stats::as.formula(paste(ds$target, "~", paste(ds$feats_all, collapse = " + ")))
+  set.seed(EXT_SEED)
+  mdl <- try(suppressWarnings(caret::train(
+    form, data = ds$md[ds$train_idx, , drop = FALSE], method = "neuralnet",
+    tuneGrid = data.frame(layer1 = hidden[1], layer2 = hidden[2], layer3 = hidden[3]),
+    metric = "RMSE", preProc = c("center", "scale", "nzv", "pca"),
+    trControl = caret::trainControl(method = "none"))), silent = TRUE)
+  if (inherits(mdl, "try-error")) {
+    message("   NARX: huấn luyện thất bại (neuralnet không hội tụ) -> bỏ qua NARX cho biến này")
+    return(rep(NA_real_, length(ds$test_idx)))
+  }
+  p <- try(as.numeric(predict(mdl, newdata = te)), silent = TRUE)
+  if (inherits(p, "try-error")) return(rep(NA_real_, length(ds$test_idx)))
+  p
+}
+
+#---- Hàm 6: các tập biến cho E3 và dữ liệu cho E5 ------------------------------------------------------
+ext_feature_sets <- function(ds) {
+  L <- ds$lag_names; G <- EXT_GROUPS
+  list(
+    "A0 Exogenous only (no lags)"              = unlist(G, use.names = FALSE),
+    "A1 Lags only (AR)"                        = L,
+    "A2 Lags + Macro"                          = c(L, G$macro),
+    "A3 Lags + Macro + Env + Political"        = c(L, G$macro, G$env, G$politic),
+    "A4 Lags + Tech + Renewable (transition)"  = c(L, G$tech, G$renew),
+    "A5 All minus Renewable"                   = c(L, G$macro, G$env, G$politic, G$tech),
+    "A6 All minus Technological"               = c(L, G$macro, G$env, G$politic, G$renew),
+    "A7 All factors (full model)"              = ds$feats_all
+  )
+}
+
+# Dự báo trực tiếp h bước: dùng thông tin tại thời điểm t (y[t], 4 lag, biến ngoại sinh) để dự báo y[t+h]
+ext_horizon_xy <- function(ds, h) {
+  y0 <- ds$md[[ds$target]]
+  X  <- cbind(as.matrix(ds$md[, ds$feats_all, drop = FALSE]), y_t = y0)
+  origin <- seq_len(ds$n - h)
+  list(X = X[origin, , drop = FALSE], y = y0[origin + h], prev = y0[origin],
+       tr = seq_len(ds$n_train - h),
+       te = (ds$n_train - h + 1):(ds$n - h))      # mục tiêu của tập test luôn là các ngày (n_train+1):n
+}
+
+#---- Chạy toàn bộ thí nghiệm cho 1 biến (dầu / khí / than) ------------------------------------------------
+ext_run_one <- function(label, cfg) {
+  message("\n=== ", label, " (", cfg$target, ") ===")
+  ds <- ext_build(cfg$target)
+  tr <- ds$train_idx; te <- ds$test_idx
+  y  <- ds$md[[ds$target]]
+  y_te    <- y[te]
+  prev_te <- ds$md[[ds$lag_names[1]]][te]                    # y[t-1]
+  message(sprintf("   n = %d | train: %s -> %s | test: %s -> %s",
+                  ds$n, format(ds$dates[tr[1]]), format(ds$dates[tail(tr, 1)]),
+                  format(ds$dates[te[1]]), format(ds$dates[tail(te, 1)])))
+
+  # ---- SVR: tune + 3 kernel + SVR/PCA
+  sel <- ext_select_X(ds$md, ds$feats_all, tr, te)
+  best <- list(); pred <- list()
+  for (kern in c("radial", "linear", "polynomial")) {
+    message("   SVR kernel = ", kern, ": tune bằng rolling-origin CV ...")
+    bp <- ext_svr_tune(sel$Xtr, y[tr], kern)
+    best[[kern]] <- bp
+    m <- ext_svr_fit(sel$Xtr, y[tr], kern, bp$cost, bp$gmult, bp$epsilon)
+    pred[[kern]] <- as.numeric(predict(m, sel$Xte))
+  }
+  message("   SVR kernel = radial + PCA ...")
+  pc <- ext_pca(sel$Xtr, sel$Xte)
+  bp <- ext_svr_tune(pc$Xtr, y[tr], "radial")
+  best[["radial_pca"]] <- bp
+  m  <- ext_svr_fit(pc$Xtr, y[tr], "radial", bp$cost, bp$gmult, bp$epsilon)
+  pred[["radial_pca"]] <- as.numeric(predict(m, pc$Xte))
+
+  # ---- Các mô hình đối chứng
+  message("   XGBoost + NARX + Naive ...")
+  xl        <- as.matrix(ds$md[, ds$lag_names[1:2], drop = FALSE])    # XGBoost của bài báo chỉ dùng Lag1, Lag2
+  p_xgb_lag <- ext_xgb(xl[tr, , drop = FALSE], y[tr], xl[te, , drop = FALSE], tuned = FALSE)
+  p_xgb_all <- ext_xgb(sel$Xtr, y[tr], sel$Xte, tuned = TRUE)
+  p_narx    <- ext_narx(ds, cfg$narx_obj, cfg$hidden)
+
+  preds <- data.frame(date = ds$dates[te], actual = y_te, prev = prev_te, check.names = FALSE)
+  preds[["SVR-RBF"]]       <- pred[["radial"]]
+  preds[["SVR-Linear"]]    <- pred[["linear"]]
+  preds[["SVR-Poly2"]]     <- pred[["polynomial"]]
+  preds[["SVR-RBF+PCA"]]   <- pred[["radial_pca"]]
+  preds[["NARX (paper)"]]  <- p_narx
+  preds[["XGBoost (lags)"]] <- p_xgb_lag
+  preds[["XGBoost (all)"]] <- p_xgb_all
+  preds[["Naive"]]         <- prev_te
+  model_cols <- setdiff(names(preds), c("date", "actual", "prev"))
+
+  # ---- E1: bảng chỉ số chính
+  nv <- sqrt(mean((y_te - prev_te)^2))
+  tab_main <- do.call(rbind, lapply(model_cols, function(mc) {
+    data.frame(Commodity = label, Model = mc,
+               ext_metrics(preds$actual, preds[[mc]], preds$prev, ds$range_y, nv, is_naive = (mc == "Naive")),
+               check.names = FALSE)
+  }))
+
+  # ---- E1: Diebold-Mariano, SVR-RBF (phương pháp 1) vs mô hình khác (phương pháp 2)
+  dm <- do.call(rbind, lapply(setdiff(model_cols, "SVR-RBF"), function(mc) {
+    e1 <- preds$actual - preds[["SVR-RBF"]]
+    e2 <- preds$actual - preds[[mc]]
+    ok <- is.finite(e1) & is.finite(e2)
+    r2s <- try(forecast::dm.test(e1[ok], e2[ok], alternative = "two.sided", h = 1, power = 2), silent = TRUE)
+    rls <- try(forecast::dm.test(e1[ok], e2[ok], alternative = "less",      h = 1, power = 2), silent = TRUE)
+    data.frame(Commodity = label, SVR = "SVR-RBF", vs = mc,
+               DM_stat = if (inherits(r2s, "try-error")) NA_real_ else unname(as.numeric(r2s$statistic)),
+               p_two_sided = if (inherits(r2s, "try-error")) NA_real_ else as.numeric(r2s$p.value),
+               p_SVR_more_accurate = if (inherits(rls, "try-error")) NA_real_ else as.numeric(rls$p.value))
+  }))
+
+  # ---- E4: theo giai đoạn trong tập test
+  per <- ifelse(preds$date < EXT_WAR_DATE, "1 Test start - 2022-02-23 (COVID-19 era)", "2 From 2022-02-24 (Russia-Ukraine war)")
+  tab_sub <- do.call(rbind, lapply(sort(unique(per)), function(pp) {
+    ii   <- which(per == pp)
+    nv_p <- sqrt(mean((preds$actual[ii] - preds$prev[ii])^2))
+    do.call(rbind, lapply(model_cols, function(mc) {
+      data.frame(Commodity = label, Period = pp, n_days = length(ii), Model = mc,
+                 ext_metrics(preds$actual[ii], preds[[mc]][ii], preds$prev[ii], ds$range_y, nv_p,
+                             is_naive = (mc == "Naive")),
+                 check.names = FALSE)
+    }))
+  }))
+
+  # ---- E3: loại bỏ nhóm biến (dùng siêu tham số tốt nhất của SVR-RBF đầy đủ biến)
+  message("   E3: loại bỏ nhóm biến ...")
+  bpr <- best[["radial"]]
+  fs  <- ext_feature_sets(ds)
+  tab_abl <- do.call(rbind, lapply(names(fs), function(nm) {
+    s <- ext_select_X(ds$md, fs[[nm]], tr, te)
+    m <- ext_svr_fit(s$Xtr, y[tr], "radial", bpr$cost, bpr$gmult, bpr$epsilon)
+    p <- as.numeric(predict(m, s$Xte))
+    data.frame(Commodity = label, Feature_set = nm, n_features = ncol(s$Xtr),
+               ext_metrics(y_te, p, prev_te, ds$range_y, nv), check.names = FALSE)
+  }))
+
+  # ---- E5: dự báo nhiều bước
+  message("   E5: dự báo nhiều bước ...")
+  tab_h <- do.call(rbind, lapply(EXT_HORIZONS, function(h) {
+    hd <- ext_horizon_xy(ds, h)
+    nz <- caret::nearZeroVar(hd$X[hd$tr, , drop = FALSE])
+    Xh <- if (length(nz) > 0) hd$X[, -nz, drop = FALSE] else hd$X
+    m     <- ext_svr_fit(Xh[hd$tr, , drop = FALSE], hd$y[hd$tr], "radial", bpr$cost, bpr$gmult, bpr$epsilon)
+    p_svr <- as.numeric(predict(m, Xh[hd$te, , drop = FALSE]))
+    p_xgb <- ext_xgb(Xh[hd$tr, , drop = FALSE], hd$y[hd$tr], Xh[hd$te, , drop = FALSE], tuned = TRUE)
+    p_nv  <- hd$prev[hd$te]
+    a     <- hd$y[hd$te]
+    nv_h  <- sqrt(mean((a - p_nv)^2))
+    mk <- function(nm, p, isn = FALSE) {
+      data.frame(Commodity = label, Horizon_days = h, Model = nm,
+                 ext_metrics(a, p, p_nv, ds$range_y, nv_h, is_naive = isn), check.names = FALSE)
+    }
+    out <- rbind(mk("SVR-RBF", p_svr), mk("XGBoost (all)", p_xgb), mk("Naive", p_nv, TRUE))
+    out$DM_p_vs_Naive <- NA_real_
+    r <- try(forecast::dm.test(a - p_svr, a - p_nv, alternative = "two.sided", h = h, power = 2), silent = TRUE)
+    if (!inherits(r, "try-error")) out$DM_p_vs_Naive[out$Model == "SVR-RBF"] <- as.numeric(r$p.value)
+    out
+  }))
+
+  tab_par <- do.call(rbind, lapply(names(best), function(k) {
+    data.frame(Commodity = label, Kernel = k, best[[k]][, c("cost", "gmult", "epsilon", "cv_rmse")], row.names = NULL)
+  }))
+
+  list(preds = preds, tab_main = tab_main, dm = dm, tab_sub = tab_sub,
+       tab_abl = tab_abl, tab_h = tab_h, tab_par = tab_par)
+}
+
+#---- CHẠY -------------------------------------------------------------------------------------------
+ext_t0  <- Sys.time()
+ext_res <- lapply(names(EXT_TARGETS), function(nm) ext_run_one(nm, EXT_TARGETS[[nm]]))
+names(ext_res) <- names(EXT_TARGETS)
+
+ext_bind <- function(field) {
+  d <- do.call(rbind, lapply(ext_res, function(r) r[[field]]))
+  rownames(d) <- NULL
+  d
+}
+ext_tab_main <- ext_bind("tab_main")
+ext_tab_dm   <- ext_bind("dm")
+ext_tab_sub  <- ext_bind("tab_sub")
+ext_tab_abl  <- ext_bind("tab_abl")
+ext_tab_h    <- ext_bind("tab_h")
+ext_tab_par  <- ext_bind("tab_par")
+ext_tab_pred <- do.call(rbind, lapply(names(ext_res), function(nm) {
+  data.frame(Commodity = nm, ext_res[[nm]]$preds, check.names = FALSE)
+}))
+rownames(ext_tab_pred) <- NULL
+
+# Số liệu NARX / LSTM do bài báo công bố (Table 3) – chỉ để tham chiếu
+ext_paper_ref <- data.frame(
+  Commodity = rep(c("OIL", "GAS", "COAL"), 2),
+  Model     = rep(c("NARX (paper, Table 3)", "LSTM (paper, Table 3)"), each = 3),
+  MAE  = c(0.0086, 0.0070, 0.0033, 0.0058, 0.0098, 0.0020),
+  RMSE = c(0.0117, 0.0112, 0.0057, 0.647,  0.0886, 0.569),
+  R2   = c(0.9911, 0.9835, 0.9915, 0.9993, 0.9986, 0.9990)
+)
+
+ext_round <- function(d, k = 4) { d[] <- lapply(d, function(x) if (is.numeric(x)) round(x, k) else x); d }
+
+cat("\n\n================ E1. SO SÁNH CHÍNH TRÊN TẬP TEST (thang min-max [0,1]) ================\n")
+cat("RMSE_vs_Naive < 1 nghĩa là tốt hơn dự báo 'giá hôm qua'. DA = tỷ lệ đoán đúng hướng tăng/giảm.\n")
+print(ext_round(ext_tab_main), row.names = FALSE)
+cat("\n--- Diebold-Mariano: SVR-RBF so với mô hình khác (h = 1, bình phương sai số) ---\n")
+cat("DM_stat < 0: SVR có sai số nhỏ hơn. p_SVR_more_accurate < 0.05: SVR chính xác hơn có ý nghĩa thống kê.\n")
+print(ext_round(ext_tab_dm), row.names = FALSE)
+cat("\n--- Tham chiếu: số liệu công bố trong bài báo (Table 3) ---\n")
+print(ext_paper_ref, row.names = FALSE)
+cat("\n================ E2. SIÊU THAM SỐ SVR ĐƯỢC CHỌN (gamma = gmult / số biến) ================\n")
+print(ext_round(ext_tab_par), row.names = FALSE)
+cat("\n================ E3. LOẠI BỎ NHÓM BIẾN (SVR-RBF) ================\n")
+print(ext_round(ext_tab_abl), row.names = FALSE)
+cat("\n================ E4. THEO GIAI ĐOẠN TRONG TẬP TEST ================\n")
+print(ext_round(ext_tab_sub), row.names = FALSE)
+cat("\n================ E5. DỰ BÁO NHIỀU BƯỚC (h ngày) ================\n")
+print(ext_round(ext_tab_h), row.names = FALSE)
+
+ext_cmp <- ext_tab_main %>%
+  dplyr::filter(Model %in% c("SVR-RBF", "NARX (paper)")) %>%
+  dplyr::select(Commodity, Model, RMSE) %>%
+  tidyr::pivot_wider(names_from = Model, values_from = RMSE) %>%
+  dplyr::mutate(`SVR vs NARX: chênh lệch RMSE (%)` = 100 * (`SVR-RBF` / `NARX (paper)` - 1))
+cat("\n--- Tóm tắt: RMSE của SVR so với NARX (âm = SVR tốt hơn) ---\n")
+print(ext_round(as.data.frame(ext_cmp)), row.names = FALSE)
+
+ext_best <- ext_tab_main %>%
+  dplyr::filter(Model != "Naive") %>%
+  dplyr::group_by(Commodity) %>%
+  dplyr::slice_min(RMSE, n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(Commodity, Model, RMSE, MAE, R2)
+cat("\n--- Mô hình có RMSE thấp nhất (không tính Naive) ---\n")
+print(ext_round(as.data.frame(ext_best)), row.names = FALSE)
+
+#---- Hình -------------------------------------------------------------------------------------------
+ext_plot_df <- ext_tab_pred[, c("Commodity", "date", "actual", "SVR-RBF", "NARX (paper)")]
+names(ext_plot_df) <- c("Commodity", "date", "Actual", "SVR-RBF", "NARX (paper)")
+ext_plot_long <- tidyr::pivot_longer(ext_plot_df, cols = c("Actual", "SVR-RBF", "NARX (paper)"),
+                                     names_to = "Series", values_to = "value")
+ext_g1 <- ggplot(ext_plot_long, aes(x = date, y = value, color = Series)) +
+  geom_line(linewidth = 0.5, na.rm = TRUE) +
+  facet_wrap(~ Commodity, ncol = 1, scales = "free_y") +
+  scale_color_manual(values = c("Actual" = "black", "SVR-RBF" = "red", "NARX (paper)" = "blue")) +
+  labs(title = "Tập test: giá thực tế vs dự báo (thang min-max)", x = "Date", y = "Normalized price", color = NULL) +
+  theme_minimal() + theme(legend.position = "bottom")
+print(ext_g1)
+ggsave("ext_fig1_forecast_SVR_vs_NARX.png", ext_g1, width = 10, height = 9, dpi = 300)
+
+ext_tab_main$Model <- factor(ext_tab_main$Model, levels = unique(ext_tab_main$Model))
+ext_g2 <- ggplot(ext_tab_main, aes(x = Model, y = RMSE, fill = grepl("SVR", Model))) +
+  geom_col(na.rm = TRUE) +
+  facet_wrap(~ Commodity, scales = "free_y") +
+  scale_fill_manual(values = c("TRUE" = "firebrick", "FALSE" = "grey60"), guide = "none") +
+  labs(title = "RMSE trên tập test (thấp hơn = tốt hơn)", x = NULL, y = "RMSE (min-max scale)") +
+  theme_minimal() + theme(axis.text.x = element_text(angle = 40, hjust = 1))
+print(ext_g2)
+ggsave("ext_fig2_RMSE_comparison.png", ext_g2, width = 12, height = 5, dpi = 300)
+
+ext_g3 <- ggplot(dplyr::filter(ext_tab_h, Model != "Naive"),
+                 aes(x = Horizon_days, y = RMSE_vs_Naive, color = Model)) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  geom_line(na.rm = TRUE) + geom_point(na.rm = TRUE) +
+  facet_wrap(~ Commodity, scales = "free_y") +
+  labs(title = "Dự báo nhiều bước: RMSE / RMSE của Naive (dưới 1 = tốt hơn Naive)",
+       x = "Số ngày dự báo trước (h)", y = "RMSE tương đối so với Naive", color = NULL) +
+  theme_minimal() + theme(legend.position = "bottom")
+print(ext_g3)
+ggsave("ext_fig3_multi_horizon.png", ext_g3, width = 10, height = 4.5, dpi = 300)
+
+#---- Xuất Excel -------------------------------------------------------------------------------------
+ext_tab_main$Model <- as.character(ext_tab_main$Model)
+write_xlsx(list(E1_main = ext_tab_main, E1_DM_test = ext_tab_dm, E2_params = ext_tab_par,
+                E3_feature_sets = ext_tab_abl, E4_subperiods = ext_tab_sub, E5_horizons = ext_tab_h,
+                predictions = ext_tab_pred, paper_Table3_ref = ext_paper_ref),
+           "ext_SVR_extended_results.xlsx")
+
+cat("\nXong. Thời gian chạy: ", format(round(difftime(Sys.time(), ext_t0, units = "mins"), 1)), "\n",
+    "File: ext_SVR_extended_results.xlsx, ext_fig1_forecast_SVR_vs_NARX.png, ",
+    "ext_fig2_RMSE_comparison.png, ext_fig3_multi_horizon.png\n", sep = "")
+#---------------------------------END OF EXTENDED EXPERIMENTS-------------------------------------
